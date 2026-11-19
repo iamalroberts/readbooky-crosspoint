@@ -8,6 +8,7 @@
 #include <Logging.h>
 #include <TrustedTime.h>
 #include <WiFi.h>
+#include <esp_rom_sys.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
@@ -333,22 +334,29 @@ bool ReadBookYSync::downloadBook(ReadBookYBookMeta& bookInOut, std::string& erro
                                  const DownloadProgressCallback& onProgress) {
   errorOut.clear();
   ReadBookYStorage::ensureDirectories();
+  esp_rom_printf("[RBY-DL] stage=downloadBook_enter\n");
 
   std::string idToken;
-  if (!READBOOKY_AUTH.ensureIdToken(idToken, errorOut)) return false;
+  if (!READBOOKY_AUTH.ensureIdToken(idToken, errorOut)) {
+    esp_rom_printf("[RBY-DL] stage=ensureIdToken_failed\n");
+    return false;
+  }
 
   const std::string targetId = !bookInOut.editionId.empty() ? bookInOut.editionId : bookInOut.bookId;
   const std::string url = std::string(READBOOKY_API_BASE_URL) + "/books/" + targetId + "/download";
+  esp_rom_printf("[RBY-DL] stage=fetch_download_meta urlLength=%u\n", static_cast<unsigned>(url.size()));
   const HttpResponse res = ReadBookYClient::getJson(url, idToken);
   ReadBookYAuth::secureScrub(idToken);
 
   if (!res.ok()) {
+    esp_rom_printf("[RBY-DL] stage=fetch_download_meta_failed status=%d\n", res.statusCode);
     errorOut = res.error.empty() ? "Download authorization failed" : res.error;
     return false;
   }
 
   JsonDocument doc;
   if (deserializeJson(doc, res.body)) {
+    esp_rom_printf("[RBY-DL] stage=parse_download_meta_failed bodyLen=%u\n", static_cast<unsigned>(res.body.size()));
     errorOut = "Invalid download metadata";
     return false;
   }
@@ -360,6 +368,7 @@ bool ReadBookYSync::downloadBook(ReadBookYBookMeta& bookInOut, std::string& erro
   const std::string workId = doc["workId"] | bookInOut.workId;
 
   if (signedUrl.empty()) {
+    esp_rom_printf("[RBY-DL] stage=missing_signed_url\n");
     errorOut = "Missing download URL";
     return false;
   }
@@ -367,6 +376,8 @@ bool ReadBookYSync::downloadBook(ReadBookYBookMeta& bookInOut, std::string& erro
   const std::string destPath = ReadBookYStorage::buildSafeEpubPath(
       bookInOut.title, !editionId.empty() ? editionId : bookInOut.bookId);
 
+  esp_rom_printf("[RBY-DL] stage=enter_downloadFileResumable signedUrlLength=%u\n",
+                 static_cast<unsigned>(signedUrl.size()));
   if (!ReadBookYClient::downloadFileResumable(signedUrl, destPath, sha256, fileSize, errorOut, onProgress)) {
     return false;
   }

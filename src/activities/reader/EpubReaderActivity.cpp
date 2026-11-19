@@ -3842,7 +3842,7 @@ void EpubReaderActivity::runReadBookYSyncInReader() {
 
   {
     RenderLock lock;
-    GUI.drawPopup(renderer, "Syncing ReadBookY...");
+    GUI.drawPopup(renderer, "Syncing ReadBooky...");
   }
   std::string err;
   const bool ok = READBOOKY_SYNC.syncJourneyNow(readbookySidecar_.journeyId, readbookySidecar_.bookId,

@@ -48,7 +48,7 @@ void ReadBookYLoginActivity::onExit() {
 
 int ReadBookYLoginActivity::listCount() const { return ROW_COUNT; }
 
-const char* ReadBookYLoginActivity::headerTitle() const { return "ReadBookY Sign In"; }
+const char* ReadBookYLoginActivity::headerTitle() const { return "ReadBooky Sign In"; }
 
 bool ReadBookYLoginActivity::handleCustomInput() {
   return popup_.handleInput(mappedInput, [this] { requestUpdate(); });
@@ -125,7 +125,7 @@ void ReadBookYLoginActivity::performSignIn() {
 
   {
     RenderLock lock;
-    GUI.drawPopup(renderer, "Signing in to ReadBookY...");
+    GUI.drawPopup(renderer, "Signing in to ReadBooky...");
   }
 
   std::string err;
@@ -148,7 +148,7 @@ void ReadBookYLoginActivity::activateIndex(const int index) {
 
   if (index == ROW_EMAIL) {
     startActivityForResult(
-        std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, "ReadBookY Email", email_, 96, InputType::Text),
+        std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, "ReadBooky Email", email_, 96, InputType::Text),
         [this](const ActivityResult& res) {
           if (!res.isCancelled && std::holds_alternative<KeyboardResult>(res.data)) {
             email_ = std::get<KeyboardResult>(res.data).text;
@@ -157,7 +157,7 @@ void ReadBookYLoginActivity::activateIndex(const int index) {
           requestUpdate();
         });
   } else if (index == ROW_PASSWORD) {
-    startActivityForResult(std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, "ReadBookY Password",
+    startActivityForResult(std::make_unique<KeyboardEntryActivity>(renderer, mappedInput, "ReadBooky Password",
                                                                    password_, 96, InputType::Password),
                            [this](const ActivityResult& res) {
                              if (!res.isCancelled && std::holds_alternative<KeyboardResult>(res.data)) {

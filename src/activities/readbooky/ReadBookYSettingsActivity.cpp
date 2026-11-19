@@ -45,7 +45,7 @@ void ReadBookYSettingsActivity::onEnter() {
 
 int ReadBookYSettingsActivity::listCount() const { return READBOOKY_AUTH.isSignedIn() ? ROW_COUNT : (ROW_COUNT - 1); }
 
-const char* ReadBookYSettingsActivity::headerTitle() const { return "ReadBookY Settings"; }
+const char* ReadBookYSettingsActivity::headerTitle() const { return "ReadBooky Settings"; }
 
 bool ReadBookYSettingsActivity::handleCustomInput() {
   return popup_.handleInput(mappedInput, [this] { requestUpdate(); });
@@ -113,7 +113,7 @@ void ReadBookYSettingsActivity::runManualSync() {
 
   {
     RenderLock lock;
-    GUI.drawPopup(renderer, "Syncing ReadBookY...");
+    GUI.drawPopup(renderer, "Syncing ReadBooky...");
   }
   std::string err;
   const bool ok = READBOOKY_SYNC.syncAllNow(err);
@@ -152,7 +152,7 @@ void ReadBookYSettingsActivity::showRejectedOps() {
 void ReadBookYSettingsActivity::runDictionaryInstaller() {
   if (!READBOOKY_AUTH.isSignedIn()) {
     const char* opts[] = {"OK"};
-    popup_.showMessage("Dictionary", "Sign in to ReadBookY or copy StarDict files into /dictionaries/ on SD.", opts, 1,
+    popup_.showMessage("Dictionary", "Sign in to ReadBooky or copy StarDict files into /dictionaries/ on SD.", opts, 1,
                        0, [](int) {});
     requestUpdate();
     return;
@@ -231,7 +231,7 @@ void ReadBookYSettingsActivity::activateIndex(const int index) {
     runDictionaryInstaller();
   } else if (index == ROW_SIGN_OUT && READBOOKY_AUTH.isSignedIn()) {
     const char* opts[] = {"Cancel", "Sign Out"};
-    popup_.showMessage("Sign Out?", "Removes stored ReadBookY tokens and cached social data. Local EPUBs stay on SD.",
+    popup_.showMessage("Sign Out?", "Removes stored ReadBooky tokens and cached social data. Local EPUBs stay on SD.",
                        opts, 2, 0, [this](const int choice) {
                          if (choice == 1) {
                            READBOOKY_AUTH.signOut(/*clearCaches=*/true);

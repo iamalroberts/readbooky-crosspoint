@@ -7,11 +7,37 @@
 
 namespace readbooky {
 
+enum class HttpErrorKind : uint8_t {
+  None = 0,
+  HttpStatus,        // Real HTTP status (100..599) returned by server
+  ConnectFailed,     // TCP/socket connect failure (e.g. ESP_ERR_HTTP_CONNECT)
+  Timeout,           // Connection, header, or read timeout
+  DnsFailed,         // Hostname DNS resolution failure
+  TlsFailed,         // TLS handshake or certificate verification failure
+  NoWifi,            // Wi-Fi disconnected
+  ClockNotSynced,    // Wall clock not synced for TLS verification
+  TransportOther,    // Write/read/peer-close/init failure before a valid HTTP response
+  SecurityBlocked,   // Non-HTTPS URL or HTTPS->HTTP downgrade blocked
+  ResponseTooLarge,  // Response exceeded safety cap
+};
+
 struct HttpResponse {
-  int statusCode = 0;
+  int statusCode = 0;  // Strictly 0 on transport failures (never -1); 100..599 only on real HTTP responses
+  HttpErrorKind errorKind = HttpErrorKind::None;
+  int espErr = 0;        // ESP-IDF esp_err_t code (0 == ESP_OK)
+  int sockErrno = 0;     // Socket errno when available
+  int tlsErr = 0;        // ESP-TLS / mbedTLS error code when available
+  int tlsCertFlags = 0;  // Certificate verification flags when available
   std::string body;
   std::string error;
-  bool ok() const { return statusCode >= 200 && statusCode < 300; }
+
+  bool ok() const { return errorKind == HttpErrorKind::None && statusCode >= 200 && statusCode < 300; }
+  bool isHttpResponse() const { return statusCode >= 100 && statusCode < 600; }
+  bool isTransportFailure() const {
+    return errorKind == HttpErrorKind::ConnectFailed || errorKind == HttpErrorKind::Timeout ||
+           errorKind == HttpErrorKind::DnsFailed || errorKind == HttpErrorKind::TlsFailed ||
+           errorKind == HttpErrorKind::NoWifi || errorKind == HttpErrorKind::TransportOther;
+  }
 };
 
 using DownloadProgressCallback = std::function<void(uint64_t downloadedBytes, uint64_t totalBytes)>;

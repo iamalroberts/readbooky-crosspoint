@@ -190,7 +190,7 @@ void ReadBookYPageActivity::submitQuestion(const std::string& question) {
   if (submittedOnline) {
     const char* opts[] = {"Back to book", "Check answer now", "Page History"};
     popup_.showMessage("Page is thinking...",
-                       "Your question is running on ReadBookY. Return to reading — you'll see a notice when ready.",
+                       "Your question is running on ReadBooky. Return to reading — you'll see a notice when ready.",
                        opts, 3, 0, [this](const int choice) {
                          if (choice == 0) {
                            finish();

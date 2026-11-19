@@ -4,13 +4,20 @@
 
 #include <ArduinoJson.h>
 #include <DeviceSecret.h>
+#include <HalMemory.h>
 #include <Logging.h>
 #include <TrustedTime.h>
+#include <WiFi.h>
+#include <esp_err.h>
 #include <esp_random.h>
+#include <esp_rom_sys.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include <nvs.h>
 #include <wolfssl/wolfcrypt/aes.h>
 #include <wolfssl/wolfcrypt/sha256.h>
 
+#include <cstdarg>
 #include <cstdio>
 #include <cstring>
 
@@ -26,6 +33,36 @@ constexpr uint8_t BLOB_VERSION = 1;
 constexpr size_t IV_LEN = 12;
 constexpr size_t TAG_LEN = 16;
 constexpr size_t MAX_REFRESH_TOKEN_LEN = 1024;
+constexpr int REFRESH_MAX_ATTEMPTS = 3;
+constexpr uint32_t REFRESH_BACKOFF_MS[REFRESH_MAX_ATTEMPTS - 1] = {1000U, 2000U};
+
+// Safe console diagnostics for auth refresh (never prints tokens, keys, passwords, or bodies).
+void rbyAuthLog(const char* fmt, ...) {
+  char buf[192];
+  va_list args;
+  va_start(args, fmt);
+  vsnprintf(buf, sizeof(buf), fmt, args);
+  va_end(args);
+  esp_rom_printf("%s\n", buf);
+}
+
+// Returns true ONLY for explicit Firebase Auth rejection codes indicating the stored
+// refresh token / user session is invalid, revoked, or disabled.
+bool isFirebaseAuthRejection(const std::string& responseBody, std::string& codeOut) {
+  codeOut.clear();
+  if (responseBody.empty()) return false;
+  JsonDocument errDoc;
+  if (deserializeJson(errDoc, responseBody)) return false;
+
+  std::string msg = errDoc["error"]["message"] | "";
+  if (msg.empty()) {
+    msg = errDoc["error"]["errors"][0]["message"] | "";
+  }
+  codeOut = msg;
+  return msg == "INVALID_REFRESH_TOKEN" || msg == "TOKEN_EXPIRED" || msg == "USER_DISABLED" ||
+         msg == "USER_NOT_FOUND" || msg == "INVALID_GRANT" || msg == "INVALID_GRANT_TYPE" ||
+         msg == "PROJECT_NUMBER_MISMATCH";
+}
 
 void deriveKeyWithDomain(const uint8_t (&secret)[32], const char* domain, uint8_t (&outKey)[32]) {
   wc_Sha256 sha;
@@ -296,7 +333,13 @@ bool ReadBookYAuth::signIn(const std::string& email, std::string& passwordInOut,
         errorOut = msg;
       }
     }
-    if (errorOut.empty()) errorOut = res.error.empty() ? "Sign-in failed" : res.error;
+    if (errorOut.empty()) {
+      if (res.isTransportFailure()) {
+        errorOut = "Can't reach ReadBooky right now.";
+      } else {
+        errorOut = res.error.empty() ? "Sign-in failed" : res.error;
+      }
+    }
     return false;
   }
 
@@ -361,7 +404,7 @@ bool ReadBookYAuth::ensureIdToken(std::string& idTokenOut, std::string& errorOut
   {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!session_.signedIn || session_.uid.empty()) {
-      errorOut = "Not signed in to ReadBookY";
+      errorOut = "Not signed in to ReadBooky";
       return false;
     }
     const int64_t nowSec = trustedtime::trustedNow();
@@ -382,15 +425,83 @@ bool ReadBookYAuth::ensureIdToken(std::string& idTokenOut, std::string& errorOut
   serializeJson(reqDoc, reqBody);
   reqDoc.clear();
 
-  const HttpResponse res = ReadBookYClient::postJson(READBOOKY_AUTH_REFRESH_URL, reqBody);
+  HttpResponse res;
+  for (int attempt = 1; attempt <= REFRESH_MAX_ATTEMPTS; ++attempt) {
+    const bool wifiConnected = (WiFi.status() == WL_CONNECTED);
+    const int rssi = wifiConnected ? WiFi.RSSI() : 0;
+    const auto heap = HalMemory::getInternalHeap();
+
+    rbyAuthLog("[RBY-AUTH] refresh attempt %d/%d", attempt, REFRESH_MAX_ATTEMPTS);
+    rbyAuthLog("[RBY-AUTH] host=securetoken.googleapis.com");
+    rbyAuthLog("[RBY-AUTH] wifiConnected=%s", wifiConnected ? "true" : "false");
+    rbyAuthLog("[RBY-AUTH] RSSI=%d", rssi);
+    rbyAuthLog("[RBY-AUTH] freeHeap=%zu", heap.freeBytes);
+    rbyAuthLog("[RBY-AUTH] largestBlock=%zu", heap.largestBlockBytes);
+
+    if (!wifiConnected) {
+      res = {};
+      res.errorKind = HttpErrorKind::NoWifi;
+      res.error = "Wi-Fi not connected";
+      rbyAuthLog("[RBY-AUTH] open=NO_WIFI");
+      break;
+    }
+
+    res = ReadBookYClient::postJson(READBOOKY_AUTH_REFRESH_URL, reqBody);
+
+    if (res.espErr != 0) {
+      rbyAuthLog("[RBY-AUTH] open=%s (errno=%d tlsErr=0x%x certFlags=0x%x)",
+                 esp_err_to_name(static_cast<esp_err_t>(res.espErr)), res.sockErrno, res.tlsErr, res.tlsCertFlags);
+    } else if (res.isHttpResponse()) {
+      rbyAuthLog("[RBY-AUTH] open=ESP_OK httpStatus=%d", res.statusCode);
+    } else {
+      rbyAuthLog("[RBY-AUTH] open=ESP_FAIL kind=%u", static_cast<unsigned>(res.errorKind));
+    }
+
+    if (res.ok()) {
+      break;
+    }
+
+    // Never retry client-side auth rejections (400/401/403) or non-transient security/clock errors
+    if (res.isHttpResponse() && res.statusCode >= 400 && res.statusCode < 500) {
+      break;
+    }
+    if (res.errorKind == HttpErrorKind::ClockNotSynced || res.errorKind == HttpErrorKind::SecurityBlocked) {
+      break;
+    }
+
+    // Retry transient transport/5xx failures with bounded backoff (1s, then 2s) while Wi-Fi remains connected
+    if (attempt < REFRESH_MAX_ATTEMPTS && (res.isTransportFailure() || res.statusCode >= 500) &&
+        WiFi.status() == WL_CONNECTED) {
+      vTaskDelay(pdMS_TO_TICKS(REFRESH_BACKOFF_MS[attempt - 1]));
+    } else {
+      break;
+    }
+  }
   secureScrub(reqBody);
 
   if (!res.ok()) {
     secureScrub(refreshToken);
-    if (res.statusCode == 400 || res.statusCode == 401 || res.statusCode == 403) {
-      errorOut = "Session expired; please sign in again";
+
+    // Only treat real HTTP 400/401/403 with Firebase auth rejection codes as requiring re-sign-in.
+    // Network/transport failures ALWAYS preserve the existing refresh token and signed-in session.
+    if (res.isHttpResponse() && (res.statusCode == 400 || res.statusCode == 401 || res.statusCode == 403)) {
+      std::string fbErrCode;
+      if (isFirebaseAuthRejection(res.body, fbErrCode)) {
+        rbyAuthLog("[RBY-AUTH] rejected code=%s", fbErrCode.c_str());
+        errorOut = "Session expired; please sign in again.";
+      } else {
+        errorOut = "Can't verify account right now (HTTP " + std::to_string(res.statusCode) +
+                   "). Your account is still signed in.";
+      }
+    } else if (res.errorKind == HttpErrorKind::ClockNotSynced) {
+      errorOut = "Clock not synced for secure sign-in. Your account is still signed in.";
+    } else if (res.errorKind == HttpErrorKind::NoWifi) {
+      errorOut = "Wi-Fi not connected. Your account is still signed in.";
+    } else if (res.isTransportFailure() || !res.isHttpResponse()) {
+      errorOut = "Can't reach ReadBooky right now. Your account is still signed in.";
     } else {
-      errorOut = res.error.empty() ? "Token refresh failed" : res.error;
+      errorOut = "ReadBooky temporarily unavailable (HTTP " + std::to_string(res.statusCode) +
+                 "). Your account is still signed in.";
     }
     return false;
   }

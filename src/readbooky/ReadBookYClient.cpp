@@ -3,6 +3,7 @@
 #ifdef ENABLE_READBOOKY
 
 #include <ArduinoJson.h>
+#include <HalMemory.h>
 #include <HalStorage.h>
 #include <Logging.h>
 #include <Memory.h>
@@ -10,10 +11,14 @@
 #include <WiFi.h>
 #include <esp_crt_bundle.h>
 #include <esp_http_client.h>
+#include <esp_rom_sys.h>
+#include <esp_tls_errors.h>
 #include <wolfssl/wolfcrypt/sha256.h>
 
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
+#include <cstdarg>
 #include <cstdio>
 #include <cstring>
 
@@ -26,6 +31,18 @@ namespace {
 
 constexpr int MAX_HTTPS_REDIRECTS = 4;
 
+// Writes unmistakable diagnostic lines directly to the always-on ESP-IDF console
+// (same transport as ESP_LOGE("HTTP_CLIENT", ...)), avoiding HWCDC TX drops on S3.
+// Formats via vsnprintf first so %zu / %llu / %lld are always handled safely.
+void rbyDlLog(const char* fmt, ...) {
+  char buf[192];
+  va_list args;
+  va_start(args, fmt);
+  vsnprintf(buf, sizeof(buf), fmt, args);
+  va_end(args);
+  esp_rom_printf("%s\n", buf);
+}
+
 std::string extractOrigin(const std::string& url) {
   const size_t schemeEnd = url.find("://");
   if (schemeEnd == std::string::npos) return "";
@@ -34,6 +51,25 @@ std::string extractOrigin(const std::string& url) {
   std::string origin = pathStart == std::string::npos ? url : url.substr(0, pathStart);
   for (char& c : origin) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
   return origin;
+}
+
+std::string extractHost(const std::string& url) {
+  const size_t schemeEnd = url.find("://");
+  if (schemeEnd == std::string::npos) return "";
+  size_t hostStart = schemeEnd + 3;
+  const size_t authorityEnd = url.find_first_of("/?#", hostStart);
+  std::string authority =
+      authorityEnd == std::string::npos ? url.substr(hostStart) : url.substr(hostStart, authorityEnd - hostStart);
+  const size_t atPos = authority.rfind('@');
+  if (atPos != std::string::npos) {
+    authority = authority.substr(atPos + 1);
+  }
+  const size_t colonPos = authority.find(':');
+  if (colonPos != std::string::npos) {
+    authority = authority.substr(0, colonPos);
+  }
+  for (char& c : authority) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  return authority;
 }
 
 std::string toLowerHex(const uint8_t* bytes, const size_t len) {
@@ -65,10 +101,66 @@ esp_err_t captureHeadersEventHandler(esp_http_client_event_t* evt) {
   return ESP_OK;
 }
 
+// Single source of truth for verified HTTPS esp_http_client configuration shared across
+// Firebase Auth (sign-in & refresh), ReadBooky device API, and GCS signed EPUB downloads.
+// Preserves esp_crt_bundle_attach, SNI, hostname verification, and manual HTTPS-only redirects.
+void configureVerifiedHttps(esp_http_client_config_t& cfg, const char* url, const esp_http_client_method_t method,
+                            HeaderCapture* headers, const int rxBufSize, const int txBufSize) {
+  cfg = {};
+  cfg.url = url;
+  cfg.method = method;
+  cfg.timeout_ms = static_cast<int>(HTTP_TIMEOUT_MS);
+  cfg.crt_bundle_attach = esp_crt_bundle_attach;  // Platform CA bundle: chain + SNI + hostname verification
+  cfg.skip_cert_common_name_check = false;
+  cfg.disable_auto_redirect = true;  // Manually enforce HTTPS-only redirects & Bearer origin isolation
+  cfg.event_handler = captureHeadersEventHandler;
+  cfg.user_data = headers;
+  cfg.buffer_size = rxBufSize;
+  cfg.buffer_size_tx = txBufSize;
+}
+
+void classifyTransportFailure(esp_http_client_handle_t client, const esp_err_t espErr, HttpResponse& res) {
+  res.statusCode = 0;  // Never leak -1 as an HTTP status on transport errors
+  res.espErr = static_cast<int>(espErr);
+  res.sockErrno = client ? esp_http_client_get_errno(client) : 0;
+  int mbedtlsErr = 0;
+  int certFlags = 0;
+  const esp_err_t lastTls =
+      client ? esp_http_client_get_and_clear_last_tls_error(client, &mbedtlsErr, &certFlags) : ESP_OK;
+  res.tlsErr = static_cast<int>(lastTls != ESP_OK ? lastTls : mbedtlsErr);
+  res.tlsCertFlags = certFlags;
+
+  if (lastTls == ESP_ERR_ESP_TLS_CANNOT_RESOLVE_HOSTNAME) {
+    res.errorKind = HttpErrorKind::DnsFailed;
+    res.error = "Sync unavailable — DNS lookup failed.";
+  } else if (lastTls == ESP_ERR_ESP_TLS_CONNECTION_TIMEOUT || lastTls == ESP_ERR_ESP_TLS_SERVER_HANDSHAKE_TIMEOUT ||
+             espErr == ESP_ERR_HTTP_READ_TIMEOUT || espErr == ESP_ERR_HTTP_EAGAIN ||
+             espErr == ESP_ERR_HTTP_CONNECTING || res.sockErrno == ETIMEDOUT) {
+    res.errorKind = HttpErrorKind::Timeout;
+    res.error = "Sync unavailable — connection timed out.";
+  } else if (certFlags != 0 || lastTls >= ESP_ERR_MBEDTLS_CERT_PARTLY_OK || mbedtlsErr != 0) {
+    res.errorKind = HttpErrorKind::TlsFailed;
+    res.error = "Sync unavailable — secure connection failed.";
+  } else if (espErr == ESP_ERR_HTTP_CONNECT || lastTls == ESP_ERR_ESP_TLS_FAILED_CONNECT_TO_HOST ||
+             lastTls == ESP_ERR_ESP_TLS_CANNOT_CREATE_SOCKET) {
+    res.errorKind = HttpErrorKind::ConnectFailed;
+    res.error = "Sync unavailable — connection failed.";
+  } else {
+    res.errorKind = HttpErrorKind::TransportOther;
+    res.error = "Sync unavailable — connection failed.";
+  }
+}
+
 HttpResponse executeJsonRequest(const esp_http_client_method_t method, const std::string& initialUrl,
                                 const std::string& requestBody, const std::string& bearerToken) {
   HttpResponse res;
+  if (WiFi.status() != WL_CONNECTED) {
+    res.errorKind = HttpErrorKind::NoWifi;
+    res.error = "Wi-Fi not connected";
+    return res;
+  }
   if (!ReadBookYClient::ensureReadyForTls(res.error)) {
+    res.errorKind = WiFi.status() != WL_CONNECTED ? HttpErrorKind::NoWifi : HttpErrorKind::ClockNotSynced;
     return res;
   }
 
@@ -77,27 +169,25 @@ HttpResponse executeJsonRequest(const esp_http_client_method_t method, const std
 
   for (int redirect = 0; redirect <= MAX_HTTPS_REDIRECTS; ++redirect) {
     if (!ReadBookYClient::isHttpsUrl(currentUrl)) {
+      res.errorKind = HttpErrorKind::SecurityBlocked;
       res.error = "Blocked non-HTTPS URL";
-      LOG_ERR("RBYHTTP", "Refused non-HTTPS URL: %s", currentUrl.c_str());
+      LOG_ERR("RBYHTTP", "Refused non-HTTPS URL for host=%s", extractHost(currentUrl).c_str());
       return res;
     }
 
     HeaderCapture headers;
-    esp_http_client_config_t cfg = {};
-    cfg.url = currentUrl.c_str();
-    cfg.method = method;
-    cfg.timeout_ms = static_cast<int>(HTTP_TIMEOUT_MS);
-    cfg.crt_bundle_attach = esp_crt_bundle_attach;  // Platform CA bundle: chain + SNI + hostname verification
-    cfg.skip_cert_common_name_check = false;
-    cfg.disable_auto_redirect = true;  // Manually enforce HTTPS-only redirects & Bearer origin isolation
-    cfg.event_handler = captureHeadersEventHandler;
-    cfg.user_data = &headers;
-    cfg.buffer_size = 4096;
-    cfg.buffer_size_tx = 2048;
+    esp_http_client_config_t cfg;
+    configureVerifiedHttps(cfg, currentUrl.c_str(), method, &headers, /*rxBufSize=*/4096, /*txBufSize=*/2048);
+
+    const std::string reqHost = extractHost(currentUrl);
+    const bool attachAuth = !bearerToken.empty() && ReadBookYClient::matchesApiOrigin(currentUrl) &&
+                            extractOrigin(currentUrl) == initialOrigin;
 
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if (!client) {
-      res.error = "HTTP client init failed";
+      res.errorKind = HttpErrorKind::TransportOther;
+      res.espErr = ESP_ERR_NO_MEM;
+      res.error = "Sync unavailable — connection failed.";
       return res;
     }
 
@@ -107,17 +197,17 @@ HttpResponse executeJsonRequest(const esp_http_client_method_t method, const std
       esp_http_client_set_header(client, "Content-Type", "application/json");
     }
 
-    // Send Bearer token ONLY to ReadBookY's configured API origin (and never after cross-origin redirects)
-    if (!bearerToken.empty() && ReadBookYClient::matchesApiOrigin(currentUrl) &&
-        extractOrigin(currentUrl) == initialOrigin) {
+    // Send Bearer token ONLY to ReadBooky's configured API origin (and never after cross-origin redirects)
+    if (attachAuth) {
       const std::string authVal = "Bearer " + bearerToken;
       esp_http_client_set_header(client, "Authorization", authVal.c_str());
     }
 
-    esp_err_t err = esp_http_client_open(client, static_cast<int>(requestBody.size()));
+    const esp_err_t err = esp_http_client_open(client, static_cast<int>(requestBody.size()));
     if (err != ESP_OK) {
-      res.error = "HTTPS connection failed (" + std::string(esp_err_to_name(err)) + ")";
-      LOG_ERR("RBYHTTP", "HTTPS open failed (%s) for %s", esp_err_to_name(err), currentUrl.c_str());
+      classifyTransportFailure(client, err, res);
+      LOG_ERR("RBYHTTP", "HTTPS open failed (%s, errno=%d, tls=0x%x) for host=%s", esp_err_to_name(err), res.sockErrno,
+              res.tlsErr, reqHost.c_str());
       esp_http_client_cleanup(client);
       return res;
     }
@@ -128,7 +218,8 @@ HttpResponse executeJsonRequest(const esp_http_client_method_t method, const std
         const int w = esp_http_client_write(client, requestBody.data() + sent,
                                             static_cast<int>(requestBody.size() - sent));
         if (w <= 0) {
-          res.error = "HTTPS request write failed";
+          classifyTransportFailure(client, ESP_ERR_HTTP_WRITE_DATA, res);
+          LOG_ERR("RBYHTTP", "HTTPS write failed (errno=%d) for host=%s", res.sockErrno, reqHost.c_str());
           esp_http_client_close(client);
           esp_http_client_cleanup(client);
           return res;
@@ -138,7 +229,21 @@ HttpResponse executeJsonRequest(const esp_http_client_method_t method, const std
     }
 
     const int64_t contentLen = esp_http_client_fetch_headers(client);
-    res.statusCode = esp_http_client_get_status_code(client);
+    const int rawStatus = esp_http_client_get_status_code(client);
+
+    // Distinguish transport/header-fetch failures from actual HTTP responses (never report HTTP -1)
+    if (contentLen < 0 || rawStatus < 100 || rawStatus >= 600) {
+      const esp_err_t hdrErr =
+          (contentLen == -ESP_ERR_HTTP_EAGAIN) ? ESP_ERR_HTTP_EAGAIN : ESP_ERR_HTTP_FETCH_HEADER;
+      classifyTransportFailure(client, hdrErr, res);
+      LOG_ERR("RBYHTTP", "HTTPS header fetch failed (contentLen=%lld rawStatus=%d errno=%d) for host=%s",
+              static_cast<long long>(contentLen), rawStatus, res.sockErrno, reqHost.c_str());
+      esp_http_client_close(client);
+      esp_http_client_cleanup(client);
+      return res;
+    }
+
+    res.statusCode = rawStatus;
 
     // Handle HTTPS redirects safely
     if ((res.statusCode == 301 || res.statusCode == 302 || res.statusCode == 303 || res.statusCode == 307 ||
@@ -148,8 +253,9 @@ HttpResponse executeJsonRequest(const esp_http_client_method_t method, const std
       esp_http_client_cleanup(client);
       if (!ReadBookYClient::isHttpsUrl(headers.location)) {
         res.statusCode = 0;
+        res.errorKind = HttpErrorKind::SecurityBlocked;
         res.error = "Blocked HTTPS-to-HTTP redirect";
-        LOG_ERR("RBYHTTP", "Refused insecure redirect to %s", headers.location.c_str());
+        LOG_ERR("RBYHTTP", "Refused insecure redirect to host=%s", extractHost(headers.location).c_str());
         return res;
       }
       currentUrl = headers.location;
@@ -157,6 +263,8 @@ HttpResponse executeJsonRequest(const esp_http_client_method_t method, const std
     }
 
     if (contentLen > static_cast<int64_t>(MAX_JSON_RESPONSE_BYTES)) {
+      res.statusCode = 0;
+      res.errorKind = HttpErrorKind::ResponseTooLarge;
       res.error = "Response exceeds safety cap";
       esp_http_client_close(client);
       esp_http_client_cleanup(client);
@@ -170,6 +278,9 @@ HttpResponse executeJsonRequest(const esp_http_client_method_t method, const std
 
     auto buf = makeUniqueNoThrow<char[]>(2048);
     if (!buf) {
+      res.statusCode = 0;
+      res.errorKind = HttpErrorKind::TransportOther;
+      res.espErr = ESP_ERR_NO_MEM;
       res.error = "Out of memory reading response";
       esp_http_client_close(client);
       esp_http_client_cleanup(client);
@@ -177,15 +288,18 @@ HttpResponse executeJsonRequest(const esp_http_client_method_t method, const std
     }
 
     bool overflow = false;
+    bool readErr = false;
     while (true) {
       const int n = esp_http_client_read(client, buf.get(), 2048);
       if (n < 0) {
-        res.error = "HTTPS read error";
+        readErr = true;
+        classifyTransportFailure(client, ESP_ERR_HTTP_READ_TIMEOUT, res);
         break;
       }
       if (n == 0) break;
       if (res.body.size() + static_cast<size_t>(n) > MAX_JSON_RESPONSE_BYTES) {
         overflow = true;
+        res.errorKind = HttpErrorKind::ResponseTooLarge;
         res.error = "Response exceeded 256 KB limit";
         break;
       }
@@ -195,16 +309,19 @@ HttpResponse executeJsonRequest(const esp_http_client_method_t method, const std
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
 
-    if (overflow) {
+    if (overflow || readErr) {
       res.body.clear();
       res.statusCode = 0;
     } else if (!res.ok() && res.error.empty()) {
+      res.errorKind = HttpErrorKind::HttpStatus;
       res.error = "HTTP " + std::to_string(res.statusCode);
     }
     return res;
   }
 
   res.statusCode = 0;
+  res.errorKind = HttpErrorKind::TransportOther;
+  res.espErr = ESP_ERR_HTTP_MAX_REDIRECT;
   res.error = "Too many HTTPS redirects";
   return res;
 }
@@ -361,25 +478,34 @@ bool ReadBookYClient::downloadFileResumable(const std::string& httpsUrl, const s
       return false;
     }
 
+    constexpr int kDownloadRxBufSize = 2048;
+    constexpr int kDownloadTxBufSize = 4096;
+
     HeaderCapture headers;
-    esp_http_client_config_t cfg = {};
-    cfg.url = currentUrl.c_str();
-    cfg.method = HTTP_METHOD_GET;
-    cfg.timeout_ms = static_cast<int>(HTTP_TIMEOUT_MS);
-    cfg.crt_bundle_attach = esp_crt_bundle_attach;
-    cfg.skip_cert_common_name_check = false;
-    cfg.disable_auto_redirect = true;
-    cfg.event_handler = captureHeadersEventHandler;
-    cfg.user_data = &headers;
-    cfg.buffer_size = static_cast<int>(DOWNLOAD_CHUNK_BYTES);
+    esp_http_client_config_t cfg;
+    configureVerifiedHttps(cfg, currentUrl.c_str(), HTTP_METHOD_GET, &headers, kDownloadRxBufSize, kDownloadTxBufSize);
+
+    const std::string destHost = extractHost(currentUrl);
+    const auto heapBefore = HalMemory::getInternalHeap();
+    rbyDlLog("[RBY-DL] host=%s", destHost.c_str());
+    rbyDlLog("[RBY-DL] urlLength=%zu", currentUrl.size());
+    rbyDlLog("[RBY-DL] txBuffer=%d", cfg.buffer_size_tx);
+    rbyDlLog("[RBY-DL] rxBuffer=%d", cfg.buffer_size);
+    rbyDlLog("[RBY-DL] resumeOffset=%llu", static_cast<unsigned long long>(resumeOffset));
+    rbyDlLog("[RBY-DL] authHeaderAttached=false");
+    rbyDlLog("[RBY-DL] freeInternalHeap=%zu", heapBefore.freeBytes);
+    rbyDlLog("[RBY-DL] largestInternalBlock=%zu", heapBefore.largestBlockBytes);
 
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    rbyDlLog("[RBY-DL] clientInit=%s", client ? "ok" : "null");
     if (!client) {
+      LOG_ERR("RBYDL", "HTTP client init failed: host=%s urlLen=%zu txBuf=%d rxBuf=%d", destHost.c_str(),
+              currentUrl.size(), cfg.buffer_size_tx, cfg.buffer_size);
       errorOut = "HTTP client init failed";
       return false;
     }
 
-    // Never send ReadBookY Authorization Bearer token to external GCS/Storage signed download URLs!
+    // Never send ReadBooky Authorization Bearer token to external GCS/Storage signed download URLs!
     esp_http_client_set_header(client, "User-Agent", "ReadBookY-CrossPoint-X4Pro/1.0");
     if (resumeOffset > 0) {
       char rangeBuf[64];
@@ -388,6 +514,7 @@ bool ReadBookYClient::downloadFileResumable(const std::string& httpsUrl, const s
     }
 
     const esp_err_t openErr = esp_http_client_open(client, 0);
+    rbyDlLog("[RBY-DL] open=%d (%s)", static_cast<int>(openErr), esp_err_to_name(openErr));
     if (openErr != ESP_OK) {
       errorOut = "Download connect failed (" + std::string(esp_err_to_name(openErr)) + ")";
       esp_http_client_cleanup(client);
@@ -396,6 +523,14 @@ bool ReadBookYClient::downloadFileResumable(const std::string& httpsUrl, const s
 
     const int64_t contentLen = esp_http_client_fetch_headers(client);
     const int status = esp_http_client_get_status_code(client);
+    rbyDlLog("[RBY-DL] status=%d contentLen=%lld", status, static_cast<long long>(contentLen));
+
+    if (contentLen < 0 || status < 100 || status >= 600) {
+      errorOut = "Download interrupted — connection failed (resumable)";
+      esp_http_client_close(client);
+      esp_http_client_cleanup(client);
+      return false;
+    }
 
     if ((status == 301 || status == 302 || status == 303 || status == 307 || status == 308) &&
         !headers.location.empty()) {

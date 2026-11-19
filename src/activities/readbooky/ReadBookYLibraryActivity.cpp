@@ -39,7 +39,7 @@ void ReadBookYLibraryActivity::loadCached() {
 
 int ReadBookYLibraryActivity::listCount() const { return 1 + static_cast<int>(books_.size()); }
 
-const char* ReadBookYLibraryActivity::headerTitle() const { return "ReadBookY Library"; }
+const char* ReadBookYLibraryActivity::headerTitle() const { return "ReadBooky Library"; }
 
 bool ReadBookYLibraryActivity::handleCustomInput() {
   return popup_.handleInput(mappedInput, [this] { requestUpdate(); });
@@ -54,7 +54,7 @@ void ReadBookYLibraryActivity::rebuildRowItems() {
 
   rowLabels_[0] = "Refresh Library";
   rowSubtitles_[0] = statusBanner_.empty()
-                         ? (WiFi.status() == WL_CONNECTED ? "Pull latest ReadBookY books" : "Offline (showing cache)")
+                         ? (WiFi.status() == WL_CONNECTED ? "Pull latest ReadBooky books" : "Offline (showing cache)")
                          : statusBanner_;
   rowValues_[0] = std::to_string(books_.size()) + " books";
 
@@ -132,7 +132,7 @@ void ReadBookYLibraryActivity::refreshFromServer() {
 
   {
     RenderLock lock;
-    GUI.drawPopup(renderer, "Loading ReadBookY library...");
+    GUI.drawPopup(renderer, "Loading ReadBooky library...");
   }
   std::string err;
   if (READBOOKY_SYNC.fetchLibrary(books_, err)) {

@@ -37,7 +37,7 @@ void ReadBookYHomeActivity::onEnter() {
 
 int ReadBookYHomeActivity::listCount() const { return static_cast<int>(rows_.size()); }
 
-const char* ReadBookYHomeActivity::headerTitle() const { return "ReadBookY"; }
+const char* ReadBookYHomeActivity::headerTitle() const { return "ReadBooky"; }
 
 bool ReadBookYHomeActivity::handleCustomInput() {
   return popup_.handleInput(mappedInput, [this] { requestUpdate(); });
@@ -48,8 +48,8 @@ void ReadBookYHomeActivity::rebuildRows() {
   hasContinueBook_ = false;
 
   if (!READBOOKY_AUTH.isSignedIn()) {
-    rows_.push_back({RowKind::SignIn, "Sign In to ReadBookY", "Use your ReadBookY email and password", ""});
-    rows_.push_back({RowKind::Settings, "ReadBookY Settings", "Wi-Fi, offline dictionary, device info", ""});
+    rows_.push_back({RowKind::SignIn, "Sign In to ReadBooky", "Use your ReadBooky email and password", ""});
+    rows_.push_back({RowKind::Settings, "ReadBooky Settings", "Wi-Fi, offline dictionary, device info", ""});
   } else {
     std::vector<ReadBookYBookMeta> lib;
     if (ReadBookYStorage::loadLibraryCache(lib)) {
@@ -73,7 +73,7 @@ void ReadBookYHomeActivity::rebuildRows() {
       rows_.push_back({RowKind::ContinueReading, "Continue: " + continueBook_.title, sub, pctBuf});
     }
 
-    rows_.push_back({RowKind::Library, "ReadBookY Library", "Browse and download books", ""});
+    rows_.push_back({RowKind::Library, "ReadBooky Library", "Browse and download books", ""});
 
     std::string syncSub = READBOOKY_SYNC.statusSummary();
     rows_.push_back({RowKind::SyncNow, "Sync Now", syncSub,
@@ -87,7 +87,7 @@ void ReadBookYHomeActivity::rebuildRows() {
     }
 
     const auto sess = READBOOKY_AUTH.session();
-    rows_.push_back({RowKind::Settings, "ReadBookY Settings", sess.email, ""});
+    rows_.push_back({RowKind::Settings, "ReadBooky Settings", sess.email, ""});
   }
 
   rowItems_.resize(rows_.size());
@@ -137,7 +137,7 @@ void ReadBookYHomeActivity::runSyncNow() {
 
   {
     RenderLock lock;
-    GUI.drawPopup(renderer, "Syncing ReadBookY...");
+    GUI.drawPopup(renderer, "Syncing ReadBooky...");
   }
   std::string err;
   const bool ok = READBOOKY_SYNC.syncAllNow(err);

@@ -19,6 +19,9 @@ enum class SettingAction {
   CustomiseStatusBar,
   ClockSettings,
   KOReaderSync,
+#ifdef ENABLE_READBOOKY
+  ReadBookY,
+#endif
   OPDSBrowser,
   Network,
   Bluetooth,

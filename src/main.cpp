@@ -51,6 +51,9 @@
 #include "util/ScreenshotUtil.h"
 #include "util/SlideSwitch.h"
 #include "util/Timezones.h"
+#ifdef ENABLE_READBOOKY
+#include "readbooky/ReadBookYSync.h"
+#endif
 
 #if CROSSPOINT_VECTOR_FONTS
 // Rendering (incl. FreeType TTF rasterization) runs on the Arduino loop task.
@@ -465,6 +468,11 @@ void enterDeepSleep(bool fromTimeout = false) {
   const bool bluetoothStopped = bleturner::beforeSleep(2000);
   if (!bluetoothStopped) LOG_ERR("SLP", "Bluetooth did not stop; deferring sleep-event delivery");
   deliverSleepPluginEvents(bluetoothStopped);
+#ifdef ENABLE_READBOOKY
+  if (bluetoothStopped) {
+    READBOOKY_SYNC.prepareForSleep();
+  }
+#endif
 
   const bool isQuickResumeSleep =
       SETTINGS.sleepScreen == CrossPointSettings::SLEEP_SCREEN_MODE::QUICK_RESUME ||
@@ -685,6 +693,9 @@ void setup() {
   // Restore the monotonic clock floor before anything reads time() (event
   // timestamps, loan-expiry checks).
   trustedtime::init();
+#ifdef ENABLE_READBOOKY
+  READBOOKY_SYNC.begin();
+#endif
   bleturner::begin(pageturner::host, SETTINGS.ble);
 
   switch (wakeupReason) {

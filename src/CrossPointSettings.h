@@ -440,6 +440,9 @@ class CrossPointSettings : public PersistableStore<CrossPointSettings> {
   bleturner::Config ble;
   // Quick Resume: keep current content visible with moon icon instead of showing a static sleep screen.
   uint8_t quickResumeSleepScreen = QUICK_RESUME_NEVER;
+#ifdef ENABLE_READBOOKY
+  uint8_t readbookySyncOnSleep = 1;
+#endif
 
   static constexpr uint8_t MIN_SLEEP_TIMEOUT_MINUTES = 1;
   static constexpr uint8_t SLEEP_TIMEOUT_NEVER_MINUTES = 31;

@@ -304,7 +304,13 @@ void CoverGridHomeUi::drawTabs(UiScreen& screen, fui::Rect rect) {
     const auto& self = *static_cast<CoverGridHomeUi*>(user);
     const int index = tab.value - static_cast<int>(self.books->size());
     const int icon = self.slotTab == SlotTab::NONE && index >= 2 ? index + 1 : index;
-    const uint8_t* bitmap = icon == 2 && self.slotTab == SlotTab::OPDS ? BookIcon : ICONS[icon];
+    const uint8_t* bitmap = icon == 2 && (self.slotTab == SlotTab::OPDS
+#ifdef ENABLE_READBOOKY
+                                          || self.slotTab == SlotTab::READBOOKY
+#endif
+                                          )
+                                ? BookIcon
+                                : ICONS[icon];
     self.renderer.drawIcon(bitmap, iconRect.x, iconRect.y, iconRect.width);
     return true;
   };

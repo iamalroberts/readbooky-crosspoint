@@ -122,6 +122,9 @@ void CrossPointSettings::toJson(JsonDocument& doc) const {
   }
 
   bleturner::writeJson(ble, doc);
+#ifdef ENABLE_READBOOKY
+  doc["readbookySyncOnSleep"] = readbookySyncOnSleep;
+#endif
 }
 
 bool CrossPointSettings::fromJson(JsonVariantConst doc) {
@@ -312,6 +315,11 @@ bool CrossPointSettings::fromJson(JsonVariantConst doc) {
   if (!bleturner::readJson(ble, doc)) {
     needsResave = true;
   }
+#ifdef ENABLE_READBOOKY
+  if (doc["readbookySyncOnSleep"].is<uint8_t>()) {
+    readbookySyncOnSleep = doc["readbookySyncOnSleep"].as<uint8_t>() ? 1 : 0;
+  }
+#endif
 
   if (needsResave) {
     LOG_DBG("CPS", "Resaving settings to update format");

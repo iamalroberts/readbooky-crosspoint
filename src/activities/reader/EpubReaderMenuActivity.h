@@ -30,7 +30,12 @@ class EpubReaderMenuActivity final : public UiListActivity {
     GO_HOME,
     SYNC,
     DELETE_CACHE,
-    DICTIONARY
+    DICTIONARY,
+#ifdef ENABLE_READBOOKY
+    READBOOKY_ASK_PAGE,
+    READBOOKY_PAGE_HISTORY,
+    READBOOKY_SYNC_NOW,
+#endif
   };
 
   struct MenuItem {
@@ -39,12 +44,22 @@ class EpubReaderMenuActivity final : public UiListActivity {
   };
 
   static void toggleBluetooth();
-  static void buildMenuItems(std::vector<MenuItem>& items, bool hasFootnotes, bool hasBookmarks, bool hasClippings);
+  static void buildMenuItems(std::vector<MenuItem>& items, bool hasFootnotes, bool hasBookmarks, bool hasClippings
+#ifdef ENABLE_READBOOKY
+                             ,
+                             bool isReadBookYBook = false, bool hasUnreadPageAnswer = false
+#endif
+  );
 
   explicit EpubReaderMenuActivity(GfxRenderer& renderer, MappedInputManager& mappedInput, const std::string& title,
                                   const int currentPage, const int totalPages, const int bookProgressPercent,
                                   const uint8_t currentOrientation, const bool hasFootnotes, bool hasBookmarks,
-                                  bool hasClippings, MenuAction& selectedAction);
+                                  bool hasClippings, MenuAction& selectedAction
+#ifdef ENABLE_READBOOKY
+                                  ,
+                                  bool isReadBookYBook = false, bool hasUnreadPageAnswer = false
+#endif
+  );
 
   void onEnter() override;
   void onExit() override;
@@ -57,7 +72,11 @@ class EpubReaderMenuActivity final : public UiListActivity {
   // fixed-capacity array avoids any heap allocation for the row list. Labels
   // are set once in the constructor (buildMenuRowItems()); buildScreen()
   // only refreshes rows whose values reflect live state.
+#ifdef ENABLE_READBOOKY
+  static constexpr size_t MAX_MENU_ITEMS = 22;
+#else
   static constexpr size_t MAX_MENU_ITEMS = 19;
+#endif
   freeink::ui::ListItem menuRowItems[MAX_MENU_ITEMS]{};
   void buildMenuRowItems();
 

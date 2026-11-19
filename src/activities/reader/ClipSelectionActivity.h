@@ -29,7 +29,12 @@ class ClipSelectionActivity final : public Activity {
 
   ClipSelectionActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
                         std::vector<std::unique_ptr<Page>> pages, int marginLeft, int marginTop, int initialX = -1,
-                        int initialY = -1, Mode mode = Mode::Clip);
+                        int initialY = -1, Mode mode = Mode::Clip
+#ifdef ENABLE_READBOOKY
+                        ,
+                        bool enableAskPage = false
+#endif
+  );
 
   // The definition viewer retains these pages until this child exits.
   ClipSelectionActivity(GfxRenderer& renderer, MappedInputManager& mappedInput,
@@ -69,7 +74,14 @@ class ClipSelectionActivity final : public Activity {
   const Page& pageAt(size_t index) const { return *(borrowedPages.empty() ? pages[index] : borrowedPages[index]); }
   bool isLookup() const { return mode != Mode::Clip; }
   int firstAction() const { return lookupAvailable ? 0 : 1; }
-  int actionCount() const { return mode == Mode::DefinitionLookup ? 1 : 3 - firstAction(); }
+  int actionCount() const {
+#ifdef ENABLE_READBOOKY
+    const int total = enableAskPage ? 4 : 3;
+    return mode == Mode::DefinitionLookup ? 1 : total - firstAction();
+#else
+    return mode == Mode::DefinitionLookup ? 1 : 3 - firstAction();
+#endif
+  }
   int actionAt(int x, int y) const;
   int closestInRow(uint16_t row, int centerX) const;
   int wordAt(int x, int y) const;
@@ -102,6 +114,9 @@ class ClipSelectionActivity final : public Activity {
   const int initialX;
   const int initialY;
   const Mode mode;
+#ifdef ENABLE_READBOOKY
+  const bool enableAskPage = false;
+#endif
   bool lookupAvailable = false;
   OptionPopup actionPopup;
   // ponytail: retain 16 button frames during refresh; increase only if overflow is observed.

@@ -19,6 +19,9 @@
 #include "ReaderActivity.h"
 #include "ReaderToolbarUi.h"
 #include "components/OptionPopup.h"
+#ifdef ENABLE_READBOOKY
+#include "readbooky/ReadBookYModels.h"
+#endif
 
 class EpubReaderActivity final : public ReaderActivity {
   std::shared_ptr<Epub> epub;
@@ -157,7 +160,12 @@ class EpubReaderActivity final : public ReaderActivity {
   bool makeRoomForChapterBuild();
   static constexpr uint32_t BUILD_ROOM_WAIT_MS = 5000;
   static constexpr uint32_t BUILD_ROOM_STEP_MS = 50;
-  bool inputOverPage() const override { return overlay != Overlay::None || ReaderActivity::inputOverPage(); }
+  bool inputOverPage() const override {
+#ifdef ENABLE_READBOOKY
+    if (readbookyPopup_.isActive()) return true;
+#endif
+    return overlay != Overlay::None || ReaderActivity::inputOverPage();
+  }
   // "Connecting Bluetooth…" or "Bluetooth failed" in place of the status bar title.
   mutable LinkNoteTitle linkNoteTitle;
   static constexpr size_t RENDER_MIN_FREE_HEAP = 24 * 1024;
@@ -241,6 +249,17 @@ class EpubReaderActivity final : public ReaderActivity {
   // Protection error captured by loadBook() for handleLoadFailure(); the
   // failed Epub itself does not outlive loadBook().
   std::string loadProtectionError;
+
+#ifdef ENABLE_READBOOKY
+  bool isReadBookYBook_ = false;
+  readbooky::ReadBookYSidecar readbookySidecar_;
+  std::string readbookyNavReason_ = "sequential";
+  OptionPopup readbookyPopup_;
+  void openReadBookYHighlightActions(int clippingIndex);
+  void openReadBookYAskPage(const std::string& selectedText, uint32_t startOffset);
+  void openReadBookYPageHistory();
+  void runReadBookYSyncInReader();
+#endif
 
   bool loadBook() override;
   bool handleLoadFailure() override;

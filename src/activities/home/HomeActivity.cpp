@@ -251,6 +251,10 @@ void HomeActivity::onEnter() {
     resolveGridCoverPaths();
     const HomeMenuItem slot = slotItem();
     coverGridUi->begin(recentBooks,
+#ifdef ENABLE_READBOOKY
+                       slot == HomeMenuItem::READBOOKY      ? CoverGridHomeUi::SlotTab::READBOOKY
+                       :
+#endif
                        slot == HomeMenuItem::PLUGINS        ? CoverGridHomeUi::SlotTab::PLUGINS
                        : slot == HomeMenuItem::OPDS_BROWSER ? CoverGridHomeUi::SlotTab::OPDS
                                                             : CoverGridHomeUi::SlotTab::NONE,
@@ -333,6 +337,11 @@ void HomeActivity::loop() {
       case HomeMenuItem::OPDS_BROWSER:
         onOpdsBrowserOpen();
         break;
+#ifdef ENABLE_READBOOKY
+      case HomeMenuItem::READBOOKY:
+        onReadBookYOpen();
+        break;
+#endif
       case HomeMenuItem::FILE_TRANSFER:
         onFileTransferOpen();
         break;
@@ -554,8 +563,16 @@ void HomeActivity::render(RenderLock&&) {
   std::vector<UIIcon> menuIcons = {Folder, Library, Transfer, Settings};
 
   if (slotItem() != HomeMenuItem::NONE) {
-    menuItems.insert(menuItems.begin() + 2, hasPlugins ? tr(STR_PLUGINS) : tr(STR_OPDS_BROWSER));
-    menuIcons.insert(menuIcons.begin() + 2, hasPlugins ? Plugins : Book);
+#ifdef ENABLE_READBOOKY
+    if (slotItem() == HomeMenuItem::READBOOKY) {
+      menuItems.insert(menuItems.begin() + 2, tr(STR_READBOOKY));
+      menuIcons.insert(menuIcons.begin() + 2, Book);
+    } else
+#endif
+    {
+      menuItems.insert(menuItems.begin() + 2, hasPlugins ? tr(STR_PLUGINS) : tr(STR_OPDS_BROWSER));
+      menuIcons.insert(menuIcons.begin() + 2, hasPlugins ? Plugins : Book);
+    }
   }
 
   if (metrics.homeContinueReadingInMenu && !recentBooks.empty()) {
@@ -601,3 +618,7 @@ void HomeActivity::onFileTransferOpen() { activityManager.goToFileTransfer(); }
 void HomeActivity::onOpdsBrowserOpen() { activityManager.goToBrowser(); }
 
 void HomeActivity::onPluginsOpen() { activityManager.goToPlugins(); }
+
+#ifdef ENABLE_READBOOKY
+void HomeActivity::onReadBookYOpen() { activityManager.goToReadBookY(); }
+#endif

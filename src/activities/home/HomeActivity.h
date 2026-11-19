@@ -23,8 +23,12 @@ class HomeActivity final : public Activity {
   // enabled, otherwise OPDS when a server is configured. NONE hides the slot.
   // NetworkModeSelectionActivity lists OPDS in exactly the other cases.
   HomeMenuItem slotItem() const {
+#ifdef ENABLE_READBOOKY
+    return HomeMenuItem::READBOOKY;
+#else
     if (hasPlugins) return HomeMenuItem::PLUGINS;
     return hasOpdsServers ? HomeMenuItem::OPDS_BROWSER : HomeMenuItem::NONE;
+#endif
   }
   bool hasContinueReading = false;
   bool coverRendered = false;      // Track if cover has been rendered once
@@ -78,6 +82,9 @@ class HomeActivity final : public Activity {
   void onFileTransferOpen();
   void onOpdsBrowserOpen();
   void onPluginsOpen();
+#ifdef ENABLE_READBOOKY
+  void onReadBookYOpen();
+#endif
 
   int getMenuItemCount() const;
   bool storeCoverBuffer();    // Store frame buffer for cover image

@@ -19,7 +19,12 @@ EpubReaderMenuActivity::EpubReaderMenuActivity(GfxRenderer& renderer, MappedInpu
                                                const std::string& title, const int currentPage, const int totalPages,
                                                const int bookProgressPercent, const uint8_t currentOrientation,
                                                const bool hasFootnotes, const bool hasBookmarks,
-                                               const bool hasClippings, MenuAction& selectedAction)
+                                               const bool hasClippings, MenuAction& selectedAction
+#ifdef ENABLE_READBOOKY
+                                               ,
+                                               const bool isReadBookYBook, const bool hasUnreadPageAnswer
+#endif
+                                               )
     : UiListActivity("EpubReaderMenu", renderer, mappedInput),
       selectedAction(selectedAction),
       title(title),
@@ -27,7 +32,11 @@ EpubReaderMenuActivity::EpubReaderMenuActivity(GfxRenderer& renderer, MappedInpu
       currentPage(currentPage),
       totalPages(totalPages),
       bookProgressPercent(bookProgressPercent) {
+#ifdef ENABLE_READBOOKY
+  buildMenuItems(menuItems, hasFootnotes, hasBookmarks, hasClippings, isReadBookYBook, hasUnreadPageAnswer);
+#else
   buildMenuItems(menuItems, hasFootnotes, hasBookmarks, hasClippings);
+#endif
   buildMenuRowItems();
 }
 
@@ -62,10 +71,23 @@ void EpubReaderMenuActivity::buildMenuRowItems() {
 }
 
 void EpubReaderMenuActivity::buildMenuItems(std::vector<MenuItem>& items, const bool hasFootnotes,
-                                            const bool hasBookmarks, const bool hasClippings) {
+                                            const bool hasBookmarks, const bool hasClippings
+#ifdef ENABLE_READBOOKY
+                                            ,
+                                            const bool isReadBookYBook, const bool hasUnreadPageAnswer
+#endif
+) {
   items.clear();
   items.reserve(MAX_MENU_ITEMS);
   items.push_back({MenuAction::SELECT_CHAPTER, StrId::STR_SELECT_CHAPTER});
+#ifdef ENABLE_READBOOKY
+  if (isReadBookYBook) {
+    items.push_back({MenuAction::READBOOKY_ASK_PAGE, StrId::STR_READBOOKY_ASK_PAGE});
+    items.push_back({MenuAction::READBOOKY_PAGE_HISTORY,
+                     hasUnreadPageAnswer ? StrId::STR_READBOOKY_PAGE_ANSWER_READY : StrId::STR_READBOOKY_PAGE_HISTORY});
+    items.push_back({MenuAction::READBOOKY_SYNC_NOW, StrId::STR_READBOOKY_SYNC});
+  }
+#endif
   if (hasFootnotes) {
     items.push_back({MenuAction::FOOTNOTES, StrId::STR_FOOTNOTES});
   }

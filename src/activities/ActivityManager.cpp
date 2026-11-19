@@ -26,6 +26,9 @@
 #include "network/CrossPointWebServerActivity.h"
 #include "network/UsbDriveActivity.h"
 #include "plugins/PluginCatalogActivity.h"
+#ifdef ENABLE_READBOOKY
+#include "readbooky/ReadBookYHomeActivity.h"
+#endif
 #include "reader/ReaderActivity.h"
 #include "reader/RemoteTurnGate.h"
 #include "settings/OpdsServerListActivity.h"
@@ -323,6 +326,17 @@ void ActivityManager::goToBrowser() {
 void ActivityManager::goToPlugins() {
   replaceActivity(std::make_unique<PluginCatalogActivity>(renderer, mappedInput, /*rootMode=*/true));
 }
+
+#ifdef ENABLE_READBOOKY
+void ActivityManager::goToReadBookY() {
+  auto activity = makeUniqueNoThrow<readbooky::ReadBookYHomeActivity>(renderer, mappedInput);
+  if (!activity) {
+    LOG_ERR("ACT", "OOM: ReadBookYHomeActivity");
+    return;
+  }
+  replaceActivity(std::move(activity));
+}
+#endif
 
 void ActivityManager::goToReader(std::string path, const bool allowFastInitialRefresh) {
   if (path.empty()) {

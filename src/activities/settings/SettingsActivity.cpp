@@ -23,6 +23,9 @@
 #include "FontDownloadActivity.h"
 #include "HomeButtonSettingsActivity.h"
 #include "KOReaderSettingsActivity.h"
+#ifdef ENABLE_READBOOKY
+#include "activities/readbooky/ReadBookYSettingsActivity.h"
+#endif
 #include "KeyboardLayoutsActivity.h"
 #include "LanguageSelectActivity.h"
 #include "MappedInputManager.h"
@@ -197,6 +200,9 @@ void SettingsActivity::rebuildSettings() {
     addAction(SettingsSection::Network, StrId::STR_BT_PAGE_TURNER, SettingAction::Bluetooth);
   }
   addAction(SettingsSection::Network, StrId::STR_KOREADER_SYNC, SettingAction::KOReaderSync);
+#ifdef ENABLE_READBOOKY
+  addAction(SettingsSection::Network, StrId::STR_READBOOKY, SettingAction::ReadBookY);
+#endif
   addAction(SettingsSection::Network, StrId::STR_OPDS_SERVERS, SettingAction::OPDSBrowser);
   addAction(SettingsSection::Network, StrId::STR_PLUGINS, SettingAction::Plugins);
 
@@ -413,6 +419,12 @@ void SettingsActivity::toggleSelectedSetting() {
       case SettingAction::KOReaderSync:
         startActivityForResult(std::make_unique<KOReaderSettingsActivity>(renderer, mappedInput), resultHandler);
         break;
+#ifdef ENABLE_READBOOKY
+      case SettingAction::ReadBookY:
+        startActivityForResult(std::make_unique<readbooky::ReadBookYSettingsActivity>(renderer, mappedInput),
+                               resultHandler);
+        break;
+#endif
       case SettingAction::OPDSBrowser:
         startActivityForResult(std::make_unique<OpdsServerListActivity>(renderer, mappedInput), resultHandler);
         break;

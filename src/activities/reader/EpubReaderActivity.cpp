@@ -53,6 +53,16 @@
 #include "SdCardFontSystem.h"
 #include "SilentRestart.h"
 #include "activities/network/WifiSelectionActivity.h"
+#ifdef ENABLE_READBOOKY
+#include "activities/readbooky/ReadBookYDiscussionActivity.h"
+#include "activities/readbooky/ReadBookYPageActivity.h"
+#include "activities/readbooky/ReadBookYPageHistoryActivity.h"
+#include "readbooky/ReadBookYAnchors.h"
+#include "readbooky/ReadBookYAuth.h"
+#include "readbooky/ReadBookYPage.h"
+#include "readbooky/ReadBookYStorage.h"
+#include "readbooky/ReadBookYSync.h"
+#endif
 #include "activities/settings/TextSettingsActivity.h"
 #include "clippings/ClippingText.h"
 #include "clippings/ClippingsManager.h"
@@ -325,6 +335,18 @@ bool EpubReaderActivity::loadBook() {
   if (!CLIPPINGS.loadForBook(epub->getPath(), epub->getTitle(), epub->getAuthor(), "epub")) {
     LOG_ERR("CLIP", "Failed to load clippings for %s", epub->getPath().c_str());
   }
+#ifdef ENABLE_READBOOKY
+  isReadBookYBook_ = readbooky::ReadBookYStorage::loadSidecar(epub->getPath(), readbookySidecar_);
+  readbookyNavReason_ = "sequential";
+  if (isReadBookYBook_) {
+    readbooky::ReadBookYBookCache cache;
+    if (readbooky::ReadBookYStorage::loadBookCache(readbookySidecar_.journeyId, cache)) {
+      readbooky::ReadBookYAnchors::mirrorToCrossPointClippings(cache);
+    }
+    READBOOKY_PAGE.refreshUnreadFlagForJourney(readbookySidecar_.journeyId);
+    READBOOKY_SYNC.triggerBackgroundSync(readbookySidecar_.journeyId);
+  }
+#endif
   return true;
 }
 
@@ -366,7 +388,13 @@ void EpubReaderActivity::openReaderMenu() {
   startActivityForResult(std::make_unique<EpubReaderMenuActivity>(
                              renderer, mappedInput, epub->getTitle(), position.displayPage(), position.totalPages,
                              bookProgressPercent, SETTINGS.orientation, !currentPageFootnotes.empty(),
-                             !cachedBookmarks.empty(), CLIPPINGS.hasClippings(), selectedMenuAction),
+                             !cachedBookmarks.empty(), CLIPPINGS.hasClippings(), selectedMenuAction
+#ifdef ENABLE_READBOOKY
+                             ,
+                             isReadBookYBook_,
+                             isReadBookYBook_ && READBOOKY_PAGE.hasUnreadForJourney(readbookySidecar_.journeyId)
+#endif
+                             ),
                          [this](const ActivityResult& result) {
                            const auto& menu = std::get<MenuResult>(result.data);
 
@@ -552,6 +580,13 @@ void EpubReaderActivity::startClipSelection(const int initialX, const int initia
       RenderLock lock;
       const int clippingIndex = clippingAtPoint(*page, initialX, initialY);
       if (clippingIndex >= 0) {
+#ifdef ENABLE_READBOOKY
+        if (isReadBookYBook_) {
+          lock.unlock();
+          openReadBookYHighlightActions(clippingIndex);
+          return;
+        }
+#endif
         const bool removed = CLIPPINGS.removeClippingAt(static_cast<size_t>(clippingIndex));
         if (!removed) LOG_ERR("CLIP", "Failed to delete highlighted clipping %d", clippingIndex);
         clippingMessage = removed ? StrId::STR_CLIPPING_REMOVED : StrId::STR_CLIPPING_DELETE_FAILED;
@@ -589,7 +624,12 @@ void EpubReaderActivity::startClipSelection(const int initialX, const int initia
   std::string author = epub->getAuthor();
 
   auto activity = makeUniqueNoThrow<ClipSelectionActivity>(renderer, mappedInput, std::move(pages), marginLeft,
-                                                           marginTop, initialX, initialY, mode);
+                                                           marginTop, initialX, initialY, mode
+#ifdef ENABLE_READBOOKY
+                                                           ,
+                                                           isReadBookYBook_
+#endif
+  );
   if (activity && restoreSelection.valid) activity->setInitialSelection(restoreSelection);
   if (!activity) {
     LOG_ERR("CLIP", "Failed to allocate clipping selection activity");
@@ -667,6 +707,47 @@ void EpubReaderActivity::startClipSelection(const int initialX, const int initia
       });
       return;
     }
+#ifdef ENABLE_READBOOKY
+    if (clipping.action == ClippingResult::Action::AskPage && isReadBookYBook_) {
+      openReadBookYAskPage(clipping.text, clipping.startOffset);
+      return;
+    }
+    if (isReadBookYBook_) {
+      const std::string chHref =
+          (epub && spineIndex < epub->getSpineItemsCount()) ? epub->getSpineItem(spineIndex).href : "";
+      readbooky::ReadBookYHighlight createdHl;
+      const bool ok = READBOOKY_SYNC.createHighlightLocal(
+          readbookySidecar_, static_cast<int>(spineIndex), chHref, clipping.startOffset, clipping.endOffset,
+          clipping.text, "", "", "public", /*isPrivate=*/false, createdHl);
+      if (ok) {
+        const std::string hlId = createdHl.id;
+        const std::string ancId = createdHl.anchorId;
+        const std::string selTxt = createdHl.selectedText;
+        const uint32_t selStart = clipping.startOffset;
+        const char* opts[] = {"Back to book", "View Discussion / Comment", "Make Private", "Ask Page"};
+        readbookyPopup_.show("Highlight Saved", opts, 4, 0, [this, hlId, ancId, selTxt, selStart](const int choice) {
+          if (choice == 1) {
+            startActivityForResult(std::make_unique<readbooky::ReadBookYDiscussionActivity>(
+                                       renderer, mappedInput, readbookySidecar_, hlId, ancId),
+                                   [this](const ActivityResult&) { requestUpdate(); });
+          } else if (choice == 2) {
+            READBOOKY_SYNC.updateVisibilityLocal(readbookySidecar_, ancId, hlId, "private", /*isPrivate=*/true);
+            requestUpdate();
+          } else if (choice == 3) {
+            openReadBookYAskPage(selTxt, selStart);
+          } else {
+            requestUpdate();
+          }
+        });
+      } else {
+        clippingMessage = StrId::STR_CLIPPING_FAILED;
+        showClippingMessage = true;
+        clippingMessageTime = millis();
+      }
+      requestUpdate();
+      return;
+    }
+#endif
     const uint16_t paragraphIndex =
         section ? section->getParagraphIndexForPage(startPage).value_or(UINT16_MAX) : UINT16_MAX;
     const auto addResult = CLIPPINGS.addClipping(
@@ -748,6 +829,12 @@ void EpubReaderActivity::loop() {
     loadFailurePopup.handleInput(mappedInput, [this] { requestUpdate(); });
     return;
   }
+#ifdef ENABLE_READBOOKY
+  if (readbookyPopup_.isActive()) {
+    readbookyPopup_.handleInput(mappedInput, [this] { requestUpdate(); });
+    return;
+  }
+#endif
   if (!epub) {
     finish();
     return;
@@ -990,17 +1077,36 @@ void EpubReaderActivity::loop() {
   }
 
   // Link taps take priority over the reader-menu and page-turn zones.
-  if (!atEndOfBook && !currentPageLinks.empty() && SETTINGS.touchReaderControls && mappedInput.hasTouch()) {
+  if (!atEndOfBook && SETTINGS.touchReaderControls && mappedInput.hasTouch()) {
     int touchX = 0;
     int touchY = 0;
     if (mappedInput.wasScreenTapped(touchX, touchY)) {
-      const auto* link = EpubReaderUtils::linkAtPoint(currentPageLinks, touchX, touchY, currentPageLinkMarginLeft,
-                                                      currentPageLinkMarginTop);
-      if (link) {
-        navigateToHref(link->href, true);
-        haptic_feedback::touchAction();
-        return;
+      if (!currentPageLinks.empty()) {
+        const auto* link = EpubReaderUtils::linkAtPoint(currentPageLinks, touchX, touchY, currentPageLinkMarginLeft,
+                                                        currentPageLinkMarginTop);
+        if (link) {
+          navigateToHref(link->href, true);
+          haptic_feedback::touchAction();
+          return;
+        }
       }
+#ifdef ENABLE_READBOOKY
+      // Single tap on an existing ReadBookY highlight opens its action menu (View Discussion / Ask Page / Visibility / Delete).
+      if (isReadBookYBook_ && section && CLIPPINGS.hasClippings() && section->currentPage >= 0 &&
+          section->currentPage < section->pageCount) {
+        auto page = section->loadPage(section->currentPage);
+        if (page) {
+          RenderLock lock;
+          const int clippingIndex = clippingAtPoint(*page, touchX, touchY);
+          lock.unlock();
+          if (clippingIndex >= 0) {
+            haptic_feedback::touchAction();
+            openReadBookYHighlightActions(clippingIndex);
+            return;
+          }
+        }
+      }
+#endif
     }
   }
 
@@ -1120,6 +1226,9 @@ void EpubReaderActivity::loop() {
 }
 
 void EpubReaderActivity::jumpToPercent(int percent) {
+#ifdef ENABLE_READBOOKY
+  readbookyNavReason_ = "jump";
+#endif
   if (!epub) return;
   const size_t bookSize = epub->getBookSize();
   if (bookSize == 0) return;
@@ -1160,6 +1269,9 @@ void EpubReaderActivity::jumpToPercent(int percent) {
 }
 
 void EpubReaderActivity::applyProgressChange(const ProgressChangeResult& sync) {
+#ifdef ENABLE_READBOOKY
+  readbookyNavReason_ = "jump";
+#endif
   if (sync.hasVisibleTextOffset && sync.spineIndex >= 0 && sync.spineIndex < epub->getSpineItemsCount()) {
     RenderLock lock;
     clearDeferredReposition();
@@ -1259,6 +1371,9 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
             const auto& chapterResult = std::get<ChapterResult>(result.data);
             RenderLock lock;
             clearDeferredReposition();
+#ifdef ENABLE_READBOOKY
+            readbookyNavReason_ = "toc";
+#endif
             currentSpineIndex = chapterResult.spineIndex;
             pendingAnchor = chapterResult.anchor;
             nextPageNumber = 0;
@@ -1378,6 +1493,20 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
       addBookmark();
       break;
     }
+#ifdef ENABLE_READBOOKY
+    case EpubReaderMenuActivity::MenuAction::READBOOKY_ASK_PAGE: {
+      openReadBookYAskPage("", currentPageVisibleOffset.value_or(0));
+      break;
+    }
+    case EpubReaderMenuActivity::MenuAction::READBOOKY_PAGE_HISTORY: {
+      openReadBookYPageHistory();
+      break;
+    }
+    case EpubReaderMenuActivity::MenuAction::READBOOKY_SYNC_NOW: {
+      runReadBookYSyncInReader();
+      break;
+    }
+#endif
   }
 }
 
@@ -1648,6 +1777,9 @@ void EpubReaderActivity::render(RenderLock&& lock) {
     loadFailurePopup.processRender(renderer, mappedInput);
     return;
   }
+#ifdef ENABLE_READBOOKY
+  if (readbookyPopup_.processRender(renderer, mappedInput)) return;
+#endif
   ReaderActivity::render(std::move(lock));
 }
 
@@ -2133,7 +2265,20 @@ bool EpubReaderActivity::saveProgress(int spineIndex, int currentPage, int pageC
                  ? currentPageVisibleOffset
                  : section->getVisibleTextOffsetForPage(static_cast<uint16_t>(currentPage));
   }
-  return EpubReaderUtils::saveProgress(*epub, spineIndex, currentPage, pageCount, offset);
+  const bool saved = EpubReaderUtils::saveProgress(*epub, spineIndex, currentPage, pageCount, offset);
+#ifdef ENABLE_READBOOKY
+  if (isReadBookYBook_ && epub && spineIndex >= 0 && spineIndex < epub->getSpineItemsCount()) {
+    const float chapterFrac = pageCount > 0 ? (static_cast<float>(currentPage + 1) / static_cast<float>(pageCount)) : 0.0f;
+    const float bookPct = std::clamp(epub->calculateProgress(spineIndex, chapterFrac), 0.0f, 1.0f) * 100.0f;
+    const std::string chHref = epub->getSpineItem(spineIndex).href;
+    const int tocIdx = epub->getTocIndexForSpineIndex(spineIndex);
+    const std::string chTitle = tocIdx >= 0 ? epub->getTocItem(tocIdx).title : "";
+    READBOOKY_SYNC.recordReadingProgress(readbookySidecar_, spineIndex, chHref, offset.value_or(0), bookPct, chTitle,
+                                         readbookyNavReason_);
+    readbookyNavReason_ = "sequential";
+  }
+#endif
+  return saved;
 }
 
 void EpubReaderActivity::rememberCurrentContentOffset() {
@@ -2578,6 +2723,12 @@ void EpubReaderActivity::renderStatusBar() const {
   } else if (sb.titleMode == CrossPointSettings::STATUS_BAR_TITLE::BOOK_TITLE) {
     title = epub ? epub->getTitle() : "";
   }
+
+#ifdef ENABLE_READBOOKY
+  if (isReadBookYBook_ && READBOOKY_PAGE.hasUnreadForJourney(readbookySidecar_.journeyId)) {
+    title = tr(STR_READBOOKY_PAGE_ANSWER_READY);
+  }
+#endif
 
   GUI.drawStatusBar(renderer, bookProgress, currentPage, pageCount, title, 0, textYOffset, true, currentPageBookmarked,
                     section ? section->isBuilding() : false);
@@ -3195,7 +3346,13 @@ void EpubReaderActivity::applyReaderTextSettings() {
 void EpubReaderActivity::buildMoreActions() {
   using MA = EpubReaderMenuActivity::MenuAction;
   EpubReaderMenuActivity::buildMenuItems(moreItems, !currentPageFootnotes.empty(), !cachedBookmarks.empty(),
-                                         CLIPPINGS.hasClippings());
+                                         CLIPPINGS.hasClippings()
+#ifdef ENABLE_READBOOKY
+                                         ,
+                                         isReadBookYBook_,
+                                         isReadBookYBook_ && READBOOKY_PAGE.hasUnreadForJourney(readbookySidecar_.journeyId)
+#endif
+  );
   moreItems.erase(std::remove_if(moreItems.begin(), moreItems.end(),
                                  [](const auto& item) {
                                    return item.action == MA::SELECT_CHAPTER || item.action == MA::TEXT_SETTINGS;
@@ -3321,6 +3478,9 @@ void EpubReaderActivity::activateMoreRow(int row) {
 }
 
 void EpubReaderActivity::navigateToHref(const std::string& hrefStr, const bool savePosition) {
+#ifdef ENABLE_READBOOKY
+  readbookyNavReason_ = savePosition ? "footnote" : "jump";
+#endif
   if (!epub) return;
 
   std::string anchor;
@@ -3569,3 +3729,129 @@ CrossPointPosition EpubReaderActivity::getCurrentPosition() const {
   }
   return localPos;
 }
+
+#ifdef ENABLE_READBOOKY
+void EpubReaderActivity::openReadBookYHighlightActions(const int clippingIndex) {
+  if (!isReadBookYBook_ || clippingIndex < 0) return;
+  const Clipping* clip = CLIPPINGS.clippingAt(static_cast<size_t>(clippingIndex));
+  if (!clip) return;
+
+  readbooky::ReadBookYBookCache cache;
+  readbooky::ReadBookYStorage::loadBookCache(readbookySidecar_.journeyId, cache);
+  const readbooky::ReadBookYHighlight* hl = readbooky::ReadBookYAnchors::findHighlightForClipping(cache, *clip);
+
+  std::string hlId = hl ? hl->id : std::string(clip->id);
+  std::string ancId = hl ? hl->anchorId : "";
+  std::string selText = hl ? hl->selectedText : "";
+  if (selText.empty()) {
+    CLIPPINGS.readClippingText(static_cast<size_t>(clippingIndex), selText);
+  }
+  const uint32_t startOff = hl && hl->sourceStartOffset != UINT32_MAX ? hl->sourceStartOffset : clip->startOffset;
+  const bool currentlyPrivate = hl ? (hl->isPrivate || hl->scope == "private") : false;
+  const bool isMine = !hl || hl->uid.empty() || hl->uid == READBOOKY_AUTH.session().uid;
+
+  std::vector<std::string> opts;
+  std::vector<int> codes;
+  if (!hlId.empty() || !ancId.empty()) {
+    opts.push_back("View Discussion");
+    codes.push_back(0);
+  }
+  opts.push_back("Ask Page");
+  codes.push_back(1);
+  if (isMine && (!hlId.empty() || !ancId.empty())) {
+    opts.push_back(currentlyPrivate ? "Make Public" : "Make Private");
+    codes.push_back(2);
+    opts.push_back("Delete Highlight");
+    codes.push_back(3);
+  }
+
+  readbookyPopup_.show(
+      StrId::STR_READBOOKY, opts, 0,
+      [this, codes, hlId, ancId, selText, startOff, currentlyPrivate, clippingIndex](const int idx) {
+        if (idx < 0 || idx >= static_cast<int>(codes.size())) {
+          requestUpdate();
+          return;
+        }
+        const int action = codes[idx];
+        if (action == 0) {
+          startActivityForResult(std::make_unique<readbooky::ReadBookYDiscussionActivity>(
+                                     renderer, mappedInput, readbookySidecar_, hlId, ancId),
+                                 [this](const ActivityResult&) { requestUpdate(); });
+        } else if (action == 1) {
+          openReadBookYAskPage(selText, startOff);
+        } else if (action == 2) {
+          const bool nextPriv = !currentlyPrivate;
+          READBOOKY_SYNC.updateVisibilityLocal(readbookySidecar_, ancId, hlId, nextPriv ? "private" : "public",
+                                               nextPriv);
+          requestUpdate();
+        } else if (action == 3) {
+          if (!hlId.empty()) {
+            READBOOKY_SYNC.deleteHighlightLocal(readbookySidecar_, hlId);
+          } else {
+            CLIPPINGS.removeClippingAt(static_cast<size_t>(clippingIndex));
+          }
+          requestUpdate();
+        }
+      });
+  requestUpdate();
+}
+
+void EpubReaderActivity::openReadBookYAskPage(const std::string& selectedText, const uint32_t startOffset) {
+  if (!isReadBookYBook_) return;
+  readbooky::ReadBookYAnchorRef selRef;
+  if (epub && currentSpineIndex >= 0 && currentSpineIndex < epub->getSpineItemsCount()) {
+    selRef.spineIndex = currentSpineIndex;
+    selRef.chapterHref = epub->getSpineItem(currentSpineIndex).href;
+    selRef.sourceOffset = startOffset == UINT32_MAX ? currentPageVisibleOffset.value_or(0) : startOffset;
+    selRef.percentage = static_cast<float>(bookPercentFor(chapterPosition()));
+    selRef.chapterTitle = currentChapterTitle();
+    selRef.valid = true;
+  }
+  startActivityForResult(std::make_unique<readbooky::ReadBookYPageActivity>(renderer, mappedInput, readbookySidecar_,
+                                                                            selectedText, selRef),
+                         [this](const ActivityResult&) {
+                           READBOOKY_PAGE.refreshUnreadFlagForJourney(readbookySidecar_.journeyId);
+                           requestUpdate();
+                         });
+}
+
+void EpubReaderActivity::openReadBookYPageHistory() {
+  if (!isReadBookYBook_) return;
+  startActivityForResult(
+      std::make_unique<readbooky::ReadBookYPageHistoryActivity>(renderer, mappedInput, readbookySidecar_),
+      [this](const ActivityResult&) {
+        READBOOKY_PAGE.refreshUnreadFlagForJourney(readbookySidecar_.journeyId);
+        requestUpdate();
+      });
+}
+
+void EpubReaderActivity::runReadBookYSyncInReader() {
+  if (!isReadBookYBook_) return;
+  if (WiFi.status() != WL_CONNECTED) {
+    startActivityForResult(std::make_unique<WifiSelectionActivity>(renderer, mappedInput, /*allowAutoConnect=*/true),
+                           [this](const ActivityResult& res) {
+                             if (!res.isCancelled && std::holds_alternative<WifiResult>(res.data) &&
+                                 std::get<WifiResult>(res.data).connected) {
+                               runReadBookYSyncInReader();
+                             } else {
+                               requestUpdate();
+                             }
+                           });
+    return;
+  }
+
+  {
+    RenderLock lock;
+    GUI.drawPopup(renderer, "Syncing ReadBookY...");
+  }
+  std::string err;
+  const bool ok = READBOOKY_SYNC.syncJourneyNow(readbookySidecar_.journeyId, readbookySidecar_.bookId,
+                                                readbookySidecar_.editionId, /*mirrorClippings=*/true, err);
+  READBOOKY_PAGE.refreshUnreadFlagForJourney(readbookySidecar_.journeyId);
+  if (!ok && !err.empty()) {
+    const char* opts[] = {"OK"};
+    readbookyPopup_.showMessage("Sync Error", err.c_str(), opts, 1, 0, [](int) {});
+  }
+  requestUpdate();
+}
+#endif
